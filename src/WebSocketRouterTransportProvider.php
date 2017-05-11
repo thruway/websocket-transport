@@ -4,6 +4,7 @@ namespace Thruway\Transport;
 
 use function GuzzleHttp\Psr7\parse_request;
 use function GuzzleHttp\Psr7\str;
+use Ratchet\RFC6455\Handshake\PermessageDeflateOptions;
 use Ratchet\RFC6455\Handshake\RequestVerifier;
 use Ratchet\RFC6455\Handshake\ServerNegotiator;
 use Ratchet\RFC6455\Messaging\CloseFrameChecker;
@@ -59,7 +60,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                 return;
             }
 
-            $serverNegotiator = new ServerNegotiator(new RequestVerifier(), false);
+            $serverNegotiator = new ServerNegotiator(new RequestVerifier(), true);
             $serverNegotiator->setStrictSubProtocolCheck(true);
             $serverNegotiator->setSupportedSubProtocols(['wamp.2.json']);
 
@@ -129,7 +130,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                     },
                     true,
                     null,
-                    null
+                    PermessageDeflateOptions::fromRequestOrResponse($response)[0]
                 )));;
 
             $connection->removeAllListeners();
