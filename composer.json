@@ -1,0 +1,40 @@
+{
+    "name": "thruway/websocket-transport",
+    "type": "library",
+    "description": "WebSocket Transport for Thruway",
+    "keywords": [
+        "WebSockets",
+        "Server",
+        "Client",
+        "WAMP",
+        "WAMP2",
+        "Autobahn",
+        "Sockets"
+    ],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Matt Bonneau", "email": "matt@bonneau.net", "role": "Developer"
+        },
+
+        {
+            "name": "David Dan", "email": "davidwdan@gmail.com", "role": "Developer"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "Thruway\\Transport\\": "src/"
+        }
+    },
+    "require": {
+        "voryx/thruway": "ratchet-0.4-dev",
+        "ratchet/rfc6455": "permessage-deflate-dev",
+        "react/socket": "^0.8.0"
+    },
+    "repositories": [
+        {
+            "type": "vcs",
+            "url":  "git@github.com:mbonneau/RFC6455.git"
+        }
+    ]
+}
