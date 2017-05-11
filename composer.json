@@ -27,7 +27,7 @@
         }
     },
     "require": {
-        "voryx/thruway": "ratchet-0.4-dev",
+        "voryx/thruway": "0.5.x-dev",
         "ratchet/rfc6455": "permessage-deflate-dev",
         "react/socket": "0.5 | 0.6 | 0.7 | 0.8"
     },
