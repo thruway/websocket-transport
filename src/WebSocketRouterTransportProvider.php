@@ -13,6 +13,7 @@ use Ratchet\RFC6455\Messaging\FrameInterface;
 use Ratchet\RFC6455\Messaging\MessageBuffer;
 use React\Socket\ConnectionInterface;
 use React\Socket\Server;
+use Thruway\Event\ConnectionCloseEvent;
 use Thruway\Event\ConnectionOpenEvent;
 use Thruway\Event\RouterStartEvent;
 use Thruway\Event\RouterStopEvent;
@@ -79,14 +80,31 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
 
             $bodyStart = $bodyStart === false ? '' : $bodyStart;
 
+            $bytesToWire = 0;
+            $bytesFromWire = 0;
+            $bytesToMsgBuffer = 0;
+            $bytesFromMsgBuffer = 0;
+
+            $connectionOpened = false;
             /** @var Session $session */
+            $session = null;
+            $sessionCleanup = function () use (&$session, &$connectionOpened, &$connection) {
+                $this->sessions->detach($session);
+                $connection->close();
+                if (!$connectionOpened) {
+                    return;
+                }
+                $this->router->getEventDispatcher()
+                    ->dispatch('connection_close', new ConnectionCloseEvent($session));
+            };
+
             $session = $this->router->createNewSession(new WebSocketTransport(
                 $psrRequest,
                 $response,
                 $connection,
                 $messageBuffer = new MessageBuffer(
                     new CloseFrameChecker(),
-                    function (\Ratchet\RFC6455\Messaging\Message $message) use (&$session) {
+                    function (\Ratchet\RFC6455\Messaging\Message $message) use (&$session, $connection, &$messageBuffer) {
                         if ($message->isBinary()) {
                             throw new \Exception('Received binary websocket frame.');
                         }
@@ -109,18 +127,22 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                             $session->dispatchMessage($msg);
                         } catch (DeserializationException $e) {
                             Logger::alert($this, "Deserialization exception occurred.");
+                            /** @var MessageBuffer $messageBuffer */
+                            $connection->end($messageBuffer->newCloseFrame(Frame::CLOSE_BAD_DATA, 'Deserialization error'));
                         } catch (\Exception $e) {
                             Logger::alert($this, "Exception occurred during onMessage: " . $e->getMessage());
                         }
                     },
-                    function ($data) use ($connection) {
+                    function ($data) use ($connection, &$bytesToWire) {
+                        $bytesToWire += $bytesToWire + strlen($data);
                         $connection->write($data);
                     },
-                    function (FrameInterface $frame) use (&$messageBuffer, $connection) {
+                    function (FrameInterface $frame) use (&$messageBuffer, $connection, $sessionCleanup) {
                         switch ($frame->getOpCode()) {
                             case Frame::OP_CLOSE:
                                 Logger::info($this, 'Got close frame');
                                 $connection->end($frame->getContents());
+                                $sessionCleanup();
                                 break;
                             case Frame::OP_PING:
                                 $connection->write($messageBuffer->newFrame($frame->getPayload(), true,
@@ -133,20 +155,32 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                     PermessageDeflateOptions::fromRequestOrResponse($response)[0]
                 )));;
 
+            $this->sessions->attach($session);
+
             $connection->removeAllListeners();
-            $connection->on('data', [$messageBuffer, 'onData']);
-            $connection->on('error', function (\Exception $e) {
+            $connection->on('data', function ($data) use ($messageBuffer, &$bytesFromWire) {
+                $bytesFromWire += strlen($data);
+                $messageBuffer->onData($data);
             });
-            $connection->on('end', function () {
+            $connection->on('error', function (\Exception $e) use (&$session, $sessionCleanup) {
+                Logger::error($this, 'Error on connection: ' . $e->getMessage());
+                $sessionCleanup();
+            });
+            $connection->on('end', function () use ($sessionCleanup) {
+                $sessionCleanup();
             });
 
             $this->router->getEventDispatcher()->dispatch("connection_open", new ConnectionOpenEvent($session));
+            $connectionOpened = true;
 
+
+            $bytesFromWire += strlen($bodyStart);
             $messageBuffer->onData($bodyStart);
         });
 
-        $connection->on('error', function (\Exception $e) {
+        $connection->on('error', function (\Exception $e) use ($connection) {
             Logger::error($this, 'Connection error');
+            $connection->close();
         });
 
         $connection->on('end', function () {
