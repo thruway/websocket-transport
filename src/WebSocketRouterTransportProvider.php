@@ -2,6 +2,7 @@
 
 namespace Thruway\Transport;
 
+use function GuzzleHttp\Psr7\parse_query;
 use function GuzzleHttp\Psr7\parse_request;
 use function GuzzleHttp\Psr7\str;
 use Ratchet\RFC6455\Handshake\PermessageDeflateOptions;
@@ -19,7 +20,9 @@ use Thruway\Event\RouterStartEvent;
 use Thruway\Event\RouterStopEvent;
 use Thruway\Logging\Logger;
 use Thruway\Message\HelloMessage;
+use Thruway\Message\Message;
 use Thruway\Serializer\DeserializationException;
+use Thruway\Serializer\JsonSerializer;
 use Thruway\Session;
 
 final class WebSocketRouterTransportProvider extends AbstractRouterTransportProvider
@@ -30,7 +33,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
     /** @var \SplObjectStorage */
     private $sessions;
 
-    public function __construct($listenAddress = 'tcp://127.0.0.1:9090/', $context = [])
+    public function __construct($listenAddress = 'tcp://127.0.0.1:9090', $context = [])
     {
         $this->listenAddress = $listenAddress;
         $this->context       = $context;
@@ -51,12 +54,10 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
 
             $header = substr($buffer, 0, $headerPos) . "\r\n";
 
-            echo $header;
-
             try {
                 $psrRequest = parse_request($header);
             } catch (\Throwable $e) {
-                Logger::log($this, LOG_ERR, $e->getMessage());
+                Logger::error($this, 'Error parsing HTTP Request: ' . $e->getMessage());
                 $connection->close();
                 return;
             }
@@ -82,8 +83,8 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
 
             $bytesToWire = 0;
             $bytesFromWire = 0;
-            $bytesToMsgBuffer = 0;
-            $bytesFromMsgBuffer = 0;
+            $bytesFromSerializer = 0;
+            $bytesToDeserializer = 0;
 
             $connectionOpened = false;
             /** @var Session $session */
@@ -98,62 +99,94 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                     ->dispatch('connection_close', new ConnectionCloseEvent($session));
             };
 
+            $serializer = new JsonSerializer();
+
+            $messageBuffer = new MessageBuffer(
+                new CloseFrameChecker(),
+                function (\Ratchet\RFC6455\Messaging\Message $message) use (&$session, $connection, &$messageBuffer, $serializer, &$bytesToDeserializer) {
+                    if ($message->isBinary()) {
+                        throw new \Exception('Received binary websocket frame.');
+                    }
+
+                    $msg = $message->getPayload();
+                    $bytesToDeserializer += strlen($msg);
+
+                    Logger::debug($this, "onMessage: ({$msg})");
+
+                    try {
+                        $msg = $serializer->deserialize($msg);
+
+                        if ($msg instanceof HelloMessage) {
+                            $details = $msg->getDetails();
+
+                            $details->transport = (object)$session->getTransport()->getTransportDetails();
+
+                            $msg->setDetails($details);
+                        }
+
+                        $session->dispatchMessage($msg);
+                    } catch (DeserializationException $e) {
+                        Logger::alert($this, "Deserialization exception occurred.");
+                        /** @var MessageBuffer $messageBuffer */
+                        $connection->end($messageBuffer->newCloseFrame(Frame::CLOSE_BAD_DATA, 'Deserialization error'));
+                    } catch (\Exception $e) {
+                        Logger::alert($this, "Exception occurred during onMessage: " . $e->getMessage());
+                    }
+                },
+                function ($data) use ($connection, &$bytesToWire) {
+                    $bytesToWire += strlen($data);
+                    $connection->write($data);
+                },
+                function (FrameInterface $frame) use (&$messageBuffer, $connection, $sessionCleanup, &$bytesToWire, &$session) {
+                    switch ($frame->getOpCode()) {
+                        case Frame::OP_CLOSE:
+                            Logger::debug($this, 'Got close frame');
+                            $connection->end($frame->getContents());
+                            $sessionCleanup();
+                            break;
+                        case Frame::OP_PING:
+                            $rawMsg      = $messageBuffer->newFrame($frame->getPayload(), true,
+                                Frame::OP_PONG)->getContents();
+                            $bytesToWire += strlen($rawMsg);
+
+                            $connection->write($rawMsg);
+                            break;
+                    }
+                },
+                true,
+                null,
+                PermessageDeflateOptions::fromRequestOrResponse($response)[0]
+            );
+
             $session = $this->router->createNewSession(new WebSocketTransport(
-                $psrRequest,
-                $response,
-                $connection,
-                $messageBuffer = new MessageBuffer(
-                    new CloseFrameChecker(),
-                    function (\Ratchet\RFC6455\Messaging\Message $message) use (&$session, $connection, &$messageBuffer) {
-                        if ($message->isBinary()) {
-                            throw new \Exception('Received binary websocket frame.');
-                        }
-
-                        $msg = $message->getPayload();
-
-                        Logger::debug($this, "onMessage: ({$msg})");
-
-                        try {
-                            $msg = $session->getTransport()->getSerializer()->deserialize($msg);
-
-                            if ($msg instanceof HelloMessage) {
-                                $details = $msg->getDetails();
-
-                                $details->transport = (object)$session->getTransport()->getTransportDetails();
-
-                                $msg->setDetails($details);
-                            }
-
-                            $session->dispatchMessage($msg);
-                        } catch (DeserializationException $e) {
-                            Logger::alert($this, "Deserialization exception occurred.");
-                            /** @var MessageBuffer $messageBuffer */
-                            $connection->end($messageBuffer->newCloseFrame(Frame::CLOSE_BAD_DATA, 'Deserialization error'));
-                        } catch (\Exception $e) {
-                            Logger::alert($this, "Exception occurred during onMessage: " . $e->getMessage());
-                        }
-                    },
-                    function ($data) use ($connection, &$bytesToWire) {
-                        $bytesToWire += $bytesToWire + strlen($data);
-                        $connection->write($data);
-                    },
-                    function (FrameInterface $frame) use (&$messageBuffer, $connection, $sessionCleanup) {
-                        switch ($frame->getOpCode()) {
-                            case Frame::OP_CLOSE:
-                                Logger::info($this, 'Got close frame');
-                                $connection->end($frame->getContents());
-                                $sessionCleanup();
-                                break;
-                            case Frame::OP_PING:
-                                $connection->write($messageBuffer->newFrame($frame->getPayload(), true,
-                                    Frame::OP_PONG)->getContents());
-                                break;
-                        }
-                    },
-                    true,
-                    null,
-                    PermessageDeflateOptions::fromRequestOrResponse($response)[0]
-                )));;
+                function (Message $msg) use ($messageBuffer, $serializer, &$bytesFromSerializer) {
+                    if ($messageBuffer === null) {
+                        throw new \Exception('messageBuffer is not set.');
+                    }
+                    $serializedMsg = $serializer->serialize($msg);
+                    $bytesFromSerializer += strlen($serializedMsg);
+                    $messageBuffer->sendMessage($serializedMsg);
+                },
+                function () use ($connection) { // connection close
+                    $connection->close();
+                },
+                function () use ($psrRequest, $connection, &$bytesToWire, &$bytesFromWire, &$bytesFromSerializer, &$bytesToDeserializer) { // transport details
+                    return [
+                        "type"              => "ratchet",
+                        "transport_address" => trim(parse_url($connection->getRemoteAddress(), PHP_URL_HOST), '[]'),
+                        "headers"           => $psrRequest->getHeaders(),
+                        "url"               => $psrRequest->getUri()->getPath(),
+                        "query_params"      => parse_query($psrRequest->getUri()->getQuery()),
+                        "cookies"           => $psrRequest->getHeader("Cookie"),
+                        "compression"       => [
+                            "to_wire"         => $bytesToWire,
+                            "from_wire"       => $bytesFromWire,
+                            "from_serializer" => $bytesFromSerializer,
+                            "to_deserializer" => $bytesToDeserializer
+                        ]
+                    ];
+                }
+            ));;
 
             $this->sessions->attach($session);
 
@@ -166,7 +199,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                 Logger::error($this, 'Error on connection: ' . $e->getMessage());
                 $sessionCleanup();
             });
-            $connection->on('end', function () use ($sessionCleanup) {
+            $connection->on('end', function () use ($sessionCleanup, &$session) {
                 $sessionCleanup();
             });
 
