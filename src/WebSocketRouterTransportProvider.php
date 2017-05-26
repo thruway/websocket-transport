@@ -133,10 +133,6 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                         Logger::alert($this, "Exception occurred during onMessage: " . $e->getMessage());
                     }
                 },
-                function ($data) use ($connection, &$bytesToWire) {
-                    $bytesToWire += strlen($data);
-                    $connection->write($data);
-                },
                 function (FrameInterface $frame) use (&$messageBuffer, $connection, $sessionCleanup, &$bytesToWire, &$session) {
                     switch ($frame->getOpCode()) {
                         case Frame::OP_CLOSE:
@@ -155,6 +151,10 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                 },
                 true,
                 null,
+                function ($data) use ($connection, &$bytesToWire) {
+                    $bytesToWire += strlen($data);
+                    $connection->write($data);
+                },
                 PermessageDeflateOptions::fromRequestOrResponse($response)[0]
             );
 
