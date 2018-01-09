@@ -12,6 +12,8 @@ use Ratchet\RFC6455\Messaging\CloseFrameChecker;
 use Ratchet\RFC6455\Messaging\Frame;
 use Ratchet\RFC6455\Messaging\FrameInterface;
 use Ratchet\RFC6455\Messaging\MessageBuffer;
+use React\EventLoop\LoopInterface;
+use React\Promise\Deferred;
 use React\Socket\ConnectionInterface;
 use React\Socket\Server;
 use Thruway\Event\ConnectionCloseEvent;
@@ -33,11 +35,23 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
     /** @var \SplObjectStorage */
     private $sessions;
 
-    public function __construct($listenAddress = 'tcp://127.0.0.1:9090', $context = [])
+    /** @var int */
+    private $timeout;
+
+    private $serverFactory;
+
+    public function __construct($listenAddress = 'tcp://127.0.0.1:9090', $timeout = 0, $context = [], callable $serverFactory = null)
     {
         $this->listenAddress = $listenAddress;
         $this->context       = $context;
         $this->sessions      = new \SplObjectStorage();
+        $this->timeout       = $timeout;
+
+        $defaultServerFactory = function ($listenAddress, LoopInterface $loop, array $context) {
+            return new Server($listenAddress, $loop, $context);
+        };
+
+        $this->serverFactory = $serverFactory === null ? $defaultServerFactory : $serverFactory;
     }
 
     public function onNewConnection(ConnectionInterface $connection)
@@ -87,9 +101,15 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
             $bytesToDeserializer = 0;
 
             $connectionOpened = false;
+
+            $timeoutTimer = null;
+
             /** @var Session $session */
             $session = null;
-            $sessionCleanup = function () use (&$session, &$connectionOpened, &$connection) {
+            $sessionCleanup = function () use (&$session, &$connectionOpened, &$connection, &$timeoutTimer) {
+                if ($timeoutTimer !== null) {
+                    $timeoutTimer->cancel();
+                }
                 $this->sessions->detach($session);
                 $connection->close();
                 if (!$connectionOpened) {
@@ -100,6 +120,14 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
             };
 
             $serializer = new JsonSerializer();
+
+            /** @var Deferred[] $pongDeferreds */
+            $pongDeferreds = [];
+            $handlePong = function () use (&$pongDeferreds) {
+                while (null !== $deferred = array_shift($pongDeferreds)) {
+                    $deferred->resolve();
+                }
+            };
 
             $messageBuffer = new MessageBuffer(
                 new CloseFrameChecker(),
@@ -133,7 +161,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                         Logger::alert($this, "Exception occurred during onMessage: " . $e->getMessage());
                     }
                 },
-                function (FrameInterface $frame) use (&$messageBuffer, $connection, $sessionCleanup, &$bytesToWire, &$session) {
+                function (FrameInterface $frame) use (&$messageBuffer, $connection, $sessionCleanup, &$bytesToWire, &$session, $handlePong) {
                     switch ($frame->getOpCode()) {
                         case Frame::OP_CLOSE:
                             Logger::debug($this, 'Got close frame');
@@ -146,6 +174,9 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                             $bytesToWire += strlen($rawMsg);
 
                             $connection->write($rawMsg);
+                            break;
+                        case Frame::OP_PONG:
+                            $handlePong();
                             break;
                     }
                 },
@@ -185,10 +216,32 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                             "to_deserializer" => $bytesToDeserializer
                         ]
                     ];
+                },
+                function () use ($messageBuffer, &$pongDeferreds) { // ping
+                    $deferred = new Deferred();
+                    $messageBuffer->sendFrame(new Frame('reregister', true, Frame::OP_PING));
+                    $pongDeferreds[] = $deferred;
+                    return $deferred->promise();
                 }
-            ));;
+            ));
 
             $this->sessions->attach($session);
+
+            $lastRecvTime = floor(microtime(true)) * 1000;
+            if ($this->timeout > 0) {
+                // timeoutTimer is used in session cleanup
+                $timeoutTimer = $this->loop->addPeriodicTimer($this->timeout / 1000, function ($timer) use (&$lastRecvTime, $sessionCleanup, $messageBuffer) {
+                    $currentMs = floor(microtime(true)) * 1000;
+                    if ($currentMs - $lastRecvTime > 2 * $this->timeout) {
+                        $sessionCleanup();
+                        return;
+                    }
+
+                    if ($currentMs - $lastRecvTime > $this->timeout) {
+                        $messageBuffer->sendFrame(new Frame(null, true, Frame::OP_PING));
+                    }
+                });
+            }
 
             $connection->removeAllListeners();
             $connection->on('data', function ($data) use ($messageBuffer, &$bytesFromWire) {
@@ -223,9 +276,14 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
 
     public function handleRouterStart(RouterStartEvent $event)
     {
-        $socket = new Server($this->listenAddress, $this->getLoop(), $this->context);
+        $serverFactory = $this->serverFactory;
+        $socket = $serverFactory($this->listenAddress, $this->getLoop(), $this->context);
 
         $socket->on('connection', [$this, 'onNewConnection']);
+
+        $socket->on('error', function (\Exception $error) {
+            Logger::error($this, 'Error on listening socket: ' . $error->getMessage());
+        });
     }
 
     public function handleRouterStop(RouterStopEvent $event)
