@@ -5,7 +5,7 @@ namespace Thruway\Transport;
 use Thruway\Exception\PingNotSupportedException;
 use Thruway\Message\Message;
 
-final class WebSocketTransport  extends AbstractTransport {
+final class WebSocketTransport extends AbstractTransport {
     private $sender;
     private $closer;
     private $getTransDetails;
@@ -16,6 +16,7 @@ final class WebSocketTransport  extends AbstractTransport {
         $this->sender          = $sender;
         $this->closer          = $closer;
         $this->getTransDetails = $getTransportDetails;
+        $this->ping            = $ping;
     }
 
     public function getTransportDetails()
