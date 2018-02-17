@@ -32,7 +32,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
     /** @var string */
     private $listenAddress;
     private $context;
-    /** @var \SplObjectStorage */
+    /** @var Session[] */
     private $sessions;
 
     /** @var int */
@@ -40,11 +40,14 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
 
     private $serverFactory;
 
+    /** @var Server */
+    private $server;
+
     public function __construct($listenAddress = 'tcp://127.0.0.1:9090', $timeout = 0, $context = [], callable $serverFactory = null)
     {
         $this->listenAddress = $listenAddress;
         $this->context       = $context;
-        $this->sessions      = new \SplObjectStorage();
+        $this->sessions      = [];
         $this->timeout       = $timeout;
 
         $defaultServerFactory = function ($listenAddress, LoopInterface $loop, array $context) {
@@ -110,7 +113,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                 if ($timeoutTimer !== null) {
                     $timeoutTimer->cancel();
                 }
-                $this->sessions->detach($session);
+                unset($this->sessions[$session->getSessionId()]);
                 $connection->close();
                 if (!$connectionOpened) {
                     return;
@@ -198,8 +201,8 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                     $bytesFromSerializer += strlen($serializedMsg);
                     $messageBuffer->sendMessage($serializedMsg);
                 },
-                function () use ($connection) { // connection close
-                    $connection->close();
+                function () use ($connection, $sessionCleanup) { // connection close
+                    $sessionCleanup();
                 },
                 function () use ($psrRequest, $connection, &$bytesToWire, &$bytesFromWire, &$bytesFromSerializer, &$bytesToDeserializer) { // transport details
                     return [
@@ -225,7 +228,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                 }
             ));
 
-            $this->sessions->attach($session);
+            $this->sessions[$session->getSessionId()] = $session;
 
             $lastRecvTime = floor(microtime(true)) * 1000;
             if ($this->timeout > 0) {
@@ -277,11 +280,11 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
     public function handleRouterStart(RouterStartEvent $event)
     {
         $serverFactory = $this->serverFactory;
-        $socket = $serverFactory($this->listenAddress, $this->getLoop(), $this->context);
+        $this->server  = $serverFactory($this->listenAddress, $this->getLoop(), $this->context);
 
-        $socket->on('connection', [$this, 'onNewConnection']);
+        $this->server->on('connection', [$this, 'onNewConnection']);
 
-        $socket->on('error', function (\Exception $error) {
+        $this->server->on('error', function (\Exception $error) {
             Logger::error($this, 'Error on listening socket: ' . $error->getMessage());
         });
     }
@@ -290,12 +293,14 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
     {
         // stop listening for connections
         if ($this->server) {
-            $this->server->socket->close();
+            $this->server->close();
         }
 
-        foreach ($this->sessions as $k) {
-            $this->sessions[$k]->shutdown();
+        foreach ($this->sessions as $session) {
+            $session->shutdown();
         }
+
+        $this->sessions = [];
     }
 
     public static function getSubscribedEvents()
