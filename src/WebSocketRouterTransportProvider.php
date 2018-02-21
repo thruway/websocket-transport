@@ -241,13 +241,14 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                     }
 
                     if ($currentMs - $lastRecvTime > $this->timeout) {
-                        $messageBuffer->sendFrame(new Frame(null, true, Frame::OP_PING));
+                        $messageBuffer->sendFrame(new Frame('', true, Frame::OP_PING));
                     }
                 });
             }
 
             $connection->removeAllListeners();
-            $connection->on('data', function ($data) use ($messageBuffer, &$bytesFromWire) {
+            $connection->on('data', function ($data) use ($messageBuffer, &$bytesFromWire, &$lastRecvTime) {
+                $lastRecvTime = floor(microtime(true)) * 1000;
                 $bytesFromWire += strlen($data);
                 $messageBuffer->onData($data);
             });
