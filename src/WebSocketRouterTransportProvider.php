@@ -2,9 +2,6 @@
 
 namespace Thruway\Transport;
 
-use function GuzzleHttp\Psr7\parse_query;
-use function GuzzleHttp\Psr7\parse_request;
-use function GuzzleHttp\Psr7\str;
 use Ratchet\RFC6455\Handshake\PermessageDeflateOptions;
 use Ratchet\RFC6455\Handshake\RequestVerifier;
 use Ratchet\RFC6455\Handshake\ServerNegotiator;
@@ -69,10 +66,10 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                 return;
             }
 
-            $header = substr($buffer, 0, $headerPos) . "\r\n";
+            $header = substr($buffer, 0, $headerPos) . "\r\n\r\n";
 
             try {
-                $psrRequest = parse_request($header);
+                $psrRequest = \GuzzleHttp\Psr7\Message::parseRequest($header);
             } catch (\Throwable $e) {
                 Logger::error($this, 'Error parsing HTTP Request: ' . $e->getMessage());
                 $connection->close();
@@ -85,7 +82,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
 
             $response = $serverNegotiator->handshake($psrRequest);
 
-            $connection->write(str($response));
+            $connection->write(\GuzzleHttp\Psr7\Message::toString($response));
 
             if ($response->getStatusCode() != 101) {
                 $connection->end();
@@ -185,6 +182,8 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                 },
                 true,
                 null,
+                null,
+                null,
                 function ($data) use ($connection, &$bytesToWire) {
                     $bytesToWire += strlen($data);
                     $connection->write($data);
@@ -210,7 +209,7 @@ final class WebSocketRouterTransportProvider extends AbstractRouterTransportProv
                         "transport_address" => trim(parse_url($connection->getRemoteAddress(), PHP_URL_HOST), '[]'),
                         "headers"           => $psrRequest->getHeaders(),
                         "url"               => $psrRequest->getUri()->getPath(),
-                        "query_params"      => parse_query($psrRequest->getUri()->getQuery()),
+                        "query_params"      => \GuzzleHttp\Psr7\Query::parse($psrRequest->getUri()->getQuery()),
                         "cookies"           => $psrRequest->getHeader("Cookie"),
                         "compression"       => [
                             "to_wire"         => $bytesToWire,

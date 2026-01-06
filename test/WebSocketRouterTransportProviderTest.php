@@ -2,16 +2,16 @@
 
 namespace Thruway\Test;
 
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
+use PHPUnit\Framework\Attributes\CoversNothing;
+use PHPUnit\Framework\Attributes\DoesNotPerformAssertions;
 use PHPUnit\Framework\TestCase;
 use Ratchet\Client\WebSocket;
-use Ratchet\ConnectionInterface;
 use Ratchet\RFC6455\Messaging\MessageInterface;
-use React\EventLoop\Factory;
+use React\EventLoop\Loop;
 use React\EventLoop\LoopInterface;
 use React\EventLoop\Timer\TimerInterface;
 use React\Promise\Deferred;
-use React\Promise\FulfilledPromise;
-use React\Socket\Connector;
 use React\Socket\ConnectorInterface;
 use React\Socket\ServerInterface;
 use Thruway\ClientSession;
@@ -26,11 +26,11 @@ use Thruway\Message\WelcomeMessage;
 use Thruway\Peer\Client;
 use Thruway\Peer\Router;
 use Thruway\Transport\PawlTransportProvider;
-use Thruway\Transport\RatchetTransportProvider;
 use Thruway\Transport\WebSocketRouterTransportProvider;
 
 class WebSocketRouterTransportProviderTest extends TestCase
 {
+    #[AllowMockObjectsWithoutExpectations]
     public function testServerFactoryGetsCalledOnRouterStart() {
         $eventDispatcher = new EventDispatcher();
 
@@ -66,16 +66,14 @@ class WebSocketRouterTransportProviderTest extends TestCase
 
     public function testWebSocketConnect()
     {
-        $loop = Factory::create();
-
-        $router = new Router($loop);
+        $router = new Router(Loop::get());
 
         $router->addTransportProvider(new WebSocketRouterTransportProvider('tcp://127.0.0.1:19090'));
         //$router->addTransportProvider(new RatchetTransportProvider('127.0.0.1', 19090));
 
         $router->start(false);
 
-        $socketConnector = new class($loop) implements ConnectorInterface {
+        $socketConnector = new class(Loop::get()) implements ConnectorInterface {
             private $realConnector;
             /** @var \React\Socket\ConnectionInterface */
             private $conn;
@@ -105,15 +103,15 @@ class WebSocketRouterTransportProviderTest extends TestCase
             }
         };
 
-        $timer = $loop->addTimer(10, function (TimerInterface $timer) {
+        $timer = Loop::addTimer(10, function () {
+            Loop::stop();
             $this->fail('Timeout');
-            $timer->getLoop()->stop();
         });
 
         $deferred1 = new Deferred();
 
-        $connector = new \Ratchet\Client\Connector($loop, $socketConnector);
-        $connector('ws://127.0.0.1:19090/', ['wamp.2.json'])
+        $connector = new \Ratchet\Client\Connector(Loop::get(), $socketConnector);
+        $connector('ws://127.0.0.1:19090/test1', ['wamp.2.json'])
             ->then(function (WebSocket $ws) use ($deferred1) {
                 $ws->on('message', function (MessageInterface $message) use ($ws, $deferred1) {
                     $message = Message::createMessageFromArray(json_decode($message->getPayload()));
@@ -142,9 +140,9 @@ class WebSocketRouterTransportProviderTest extends TestCase
 //        $client1->start(false);
 
 
-        $client2 = new Client('some.realm', $loop);
+        $client2 = new Client('some.realm', Loop::get());
         $client2->setAttemptRetry(false);
-        $client2->addTransportProvider(new PawlTransportProvider('ws://127.0.0.1:19090'));
+        $client2->addTransportProvider(new PawlTransportProvider('ws://127.0.0.1:19090/test2'));
         $client2->on('open', function (ClientSession $session) use ($deferred1, $socketConnector, $client2, $router, $timer) {
             $deferred1->promise()->then(function () use ($session) {
                 return $session->register('some.procedure', function () {
@@ -163,7 +161,7 @@ class WebSocketRouterTransportProviderTest extends TestCase
             })->otherwise(function () {
                 $this->fail('failed to replace orphaned registration');
             })->always(function () use ($client2, $router, $socketConnector, $timer) {
-                $timer->cancel();
+                Loop::cancelTimer($timer);
                 if ($client2->getSession()) {
                     $client2->getSession()->close();
                 }
@@ -173,6 +171,6 @@ class WebSocketRouterTransportProviderTest extends TestCase
         });
         $client2->start(false);
 
-        $loop->run();
+        Loop::get()->run();
     }
 }
